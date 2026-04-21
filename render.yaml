@@ -6,19 +6,13 @@ services:
     startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     envVars:
       - key: FIREBASE_CRED_JSON
-        sync: false                # JSON string của Firebase service account
+        sync: false
       - key: FIREBASE_DB_URL
-        sync: false                # https://your-project-default-rtdb.firebaseio.com
-      - key: MQTT_BROKER
-        value: broker.hivemq.com
-      - key: MQTT_PORT
-        value: "1883"
-      - key: TOPIC_SENSOR
-        value: esp32/dht22
-      - key: TOPIC_LCD
-        value: esp32/lcd
+        sync: false
       - key: DEFAULT_LAT
         value: "21.0285"
       - key: DEFAULT_LON
         value: "105.8542"
+      - key: POLL_INTERVAL
+        value: "30"
     autoDeploy: true
