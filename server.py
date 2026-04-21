@@ -1,7 +1,7 @@
 """
 server.py – ESP32 Weather AI Server
 Chạy liên tục trên Render. Luồng:
-  Firebase RTDB (dự báo OWM) + MQTT (DHT22 từ ESP32)
+  Open-Meteo (miễn phí, không cần API key) + MQTT (DHT22 từ ESP32)
   → ai_core.predict()
   → MQTT publish → ESP32 LCD
 """
@@ -38,7 +38,7 @@ TOPIC_SENSOR  = os.environ.get("TOPIC_SENSOR",  "esp32/dht22")    # ESP32 → Se
 TOPIC_LCD     = os.environ.get("TOPIC_LCD",     "esp32/lcd")       # Server → ESP32
 TOPIC_STATUS  = os.environ.get("TOPIC_STATUS",  "esp32/status")
 
-OWM_API_KEY   = os.environ.get("OWM_API_KEY",   "")
+# Open-Meteo – không cần API key
 DEFAULT_LAT   = float(os.environ.get("DEFAULT_LAT", "21.0285"))
 DEFAULT_LON   = float(os.environ.get("DEFAULT_LON", "105.8542"))
 
@@ -85,46 +85,64 @@ def firebase_write(path: str, data: dict):
         log.warning(f"Firebase write error: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenWeatherMap helper
+# Open-Meteo helper  (miễn phí, không cần API key)
+# Docs: https://open-meteo.com/en/docs
 # ─────────────────────────────────────────────────────────────────────────────
-_owm_cache: dict = {}
-_owm_cache_ts: float = 0
-OWM_CACHE_TTL = 900  # 15 phút
+_meteo_cache: dict = {}
+_meteo_cache_ts: float = 0
+METEO_CACHE_TTL = 900  # 15 phút
 
-def get_owm_forecast(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> dict:
-    global _owm_cache, _owm_cache_ts
-    if time.time() - _owm_cache_ts < OWM_CACHE_TTL and _owm_cache:
-        return _owm_cache
-
-    if not OWM_API_KEY:
-        log.warning("OWM_API_KEY not set")
-        return {}
+def get_meteo_forecast(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> dict:
+    """
+    Gọi Open-Meteo API lấy dự báo theo giờ.
+    Trả về dict chuẩn để đưa vào ai_core:
+        rain_prob_1h, rain_prob_3h, rain_prob_6h, rain_prob_12h
+        rain_forecast_1h_mm .. rain_forecast_12h_mm
+    """
+    global _meteo_cache, _meteo_cache_ts
+    if time.time() - _meteo_cache_ts < METEO_CACHE_TTL and _meteo_cache:
+        return _meteo_cache
 
     try:
-        url = (f"https://api.openweathermap.org/data/3.0/onecall"
-               f"?lat={lat}&lon={lon}&exclude=minutely,daily,alerts"
-               f"&appid={OWM_API_KEY}&units=metric")
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&hourly=precipitation_probability,precipitation"
+            "&forecast_days=2"
+            "&timezone=Asia%2FBangkok"   # UTC+7
+            "&timeformat=unixtime"
+        )
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         raw = r.json()
-        hourly = raw.get("hourly", [])
+
+        hourly      = raw["hourly"]
+        times       = hourly["time"]                        # list of unix timestamps
+        prec_prob   = hourly["precipitation_probability"]   # % 0-100
+        prec_mm     = hourly["precipitation"]               # mm
+
+        # Tìm index giờ hiện tại
+        now_ts = time.time()
+        # Giờ hiện tại → lấy index gần nhất (làm tròn xuống theo giờ)
+        cur_idx = 0
+        for i, t in enumerate(times):
+            if t <= now_ts:
+                cur_idx = i
+
         result = {}
         for h in [1, 3, 6, 12]:
-            if h < len(hourly):
-                item = hourly[h]
-                wid = item.get("weather", [{}])[0].get("id", 800)
-                pop = item.get("pop", 0)
-                result[f"rain_prob_{h}h"]         = round(pop, 3)
-                result[f"rain_forecast_{h}h_mm"]  = round(
-                    item.get("rain", {}).get("1h", 0), 2
-                )
-        _owm_cache    = result
-        _owm_cache_ts = time.time()
-        log.info(f"OWM fetched: {result}")
+            idx = min(cur_idx + h, len(times) - 1)
+            result[f"rain_prob_{h}h"]        = round(prec_prob[idx] / 100.0, 3)
+            result[f"rain_forecast_{h}h_mm"] = round(prec_mm[idx], 2)
+
+        _meteo_cache    = result
+        _meteo_cache_ts = time.time()
+        log.info(f"Open-Meteo fetched: {result}")
         return result
+
     except Exception as e:
-        log.error(f"OWM error: {e}")
-        return _owm_cache  # trả cache cũ nếu lỗi
+        log.error(f"Open-Meteo error: {e}")
+        return _meteo_cache  # trả cache cũ nếu lỗi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # History buffer (lag features)
@@ -167,8 +185,8 @@ def process_and_publish(sensor_payload: dict, mqtt_client=None):
     temp = float(sensor_payload.get("temperature", 30))
     hum  = float(sensor_payload.get("humidity", 60))
 
-    # 1. Lấy dự báo OWM (cache 15 phút)
-    owm = get_owm_forecast()
+    # 1. Lấy dự báo Open-Meteo (cache 15 phút, không cần API key)
+    meteo = get_meteo_forecast()
 
     # 2. Đọc thêm từ Firebase (nếu có dữ liệu bổ sung)
     fb_extra = firebase_read("/weather/owm") or {}
@@ -178,7 +196,7 @@ def process_and_publish(sensor_payload: dict, mqtt_client=None):
         "temperature_c": temp,
         "humidity_rh":   hum,
         "timestamp":     datetime.now(timezone.utc).isoformat(),
-        **owm,
+        **meteo,
         **fb_extra,         # Firebase ghi đè nếu có
         **_build_lag_features(),
     }
