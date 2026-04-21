@@ -5,14 +5,12 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     envVars:
-      - key: OWM_API_KEY
-        sync: false                # Điền thủ công trong Render Dashboard
       - key: FIREBASE_CRED_JSON
         sync: false                # JSON string của Firebase service account
       - key: FIREBASE_DB_URL
         sync: false                # https://your-project-default-rtdb.firebaseio.com
       - key: MQTT_BROKER
-        value: broker.hivemq.com   # Hoặc MQTT broker riêng
+        value: broker.hivemq.com
       - key: MQTT_PORT
         value: "1883"
       - key: TOPIC_SENSOR
